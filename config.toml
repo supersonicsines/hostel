@@ -1,0 +1,21 @@
+# Localhostel Configuration
+# Style your localhost session manager
+
+[theme]
+# Options: "dark", "light", "midnight"
+preset = "dark"
+
+[display]
+# Refresh interval in seconds
+refresh_interval = 2
+# Show PID column
+show_pid = true
+
+[ports]
+# Only show these port ranges (empty = show all)
+# include = [[3000, 3999], [8000, 8999], [5000, 5999]]
+# Exclude specific ports
+exclude = [22, 53, 631]
+# Include listeners bound to all network interfaces, such as *:3000.
+# Disabled by default so the app only shows loopback listeners.
+include_wildcard = false
