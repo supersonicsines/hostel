@@ -65,6 +65,9 @@ HOSTEL must:
 - Open selected services in the default browser.
 - Kill selected services only after confirmation and verification.
 - Support short inline memos for live services.
+- Support persistent keyword filters that hide matching services.
+- Support automatic framework/tool badges for common vibecoder services.
+- Support per-service open paths, such as `/docs` or `/admin`.
 
 HOSTEL must not:
 
@@ -110,7 +113,9 @@ struct LocalService {
     address: String,
     process_name: String,
     command: String,
+    kind: ServiceKind,
     memo: Option<String>,
+    url_path: Option<String>,
 }
 ```
 
@@ -125,7 +130,9 @@ Services are sorted by port ascending.
 5. User moves with arrow keys or vim keys.
 6. User presses `Enter` to open `http://localhost:{port}`.
 7. User presses `m` to add a short memo.
-8. User presses `k` or `K` to kill a service after confirmation.
+8. User presses `u` to set an optional open path like `/docs`.
+9. User presses `f` to configure hidden-service keywords.
+10. User presses `k` or `K` to kill a service after confirmation.
 
 ## Visual Direction
 
@@ -195,15 +202,15 @@ Example layout:
 
         ╭────────────────────────────────────────────╮
         │ PORT   PID      SERVICE                    │
-        │ 5173   91231    node                       │
+        │ 5173   91231    node  Vite                 │
         │                 frontend                   │
-        │ 3000   88410    next-server                │
+        │ 3000   88410    next-server  Next          │
         │                 dashboard                   │
-        │ 8080   77221    python3                    │
+        │ 8080   77221    python3  API  -> /docs     │
         │                 api                         │
         ╰────────────────────────────────────────────╯
 
-             ↑↓ select   Enter open   k kill   m memo   q quit
+             ↑↓ select   Enter open   k kill   m memo   u url   f filter   q quit
 ```
 
 Requirements:
@@ -211,7 +218,9 @@ Requirements:
 - The service list is centered.
 - The list is scrollable.
 - The selected row is clearly highlighted.
+- Automatic service badges appear inline when HOSTEL recognizes the tool/framework.
 - Memos appear inline as subtitles under their process.
+- Open-path overrides appear inline with `-> /path`.
 - Borders must be enforced.
 - Text must never bleed through borders.
 - Long text must truncate cleanly with ellipsis.
@@ -232,6 +241,8 @@ Regular mode:
 - `Enter`: open selected service in browser
 - `k`: open kill confirmation
 - `m`: edit memo
+- `u`: edit open path
+- `f`: edit persistent hide filters
 - `r`: refresh service list
 - `q`: quit
 - `?`: optional small help overlay
@@ -243,11 +254,37 @@ Vim mode:
 - `Enter`: open selected service in browser
 - `K`: open kill confirmation
 - `m`: edit memo
+- `u`: edit open path
+- `f`: edit persistent hide filters
 - `r`: refresh service list
 - `q`: quit
 - `?`: optional small help overlay
 
 Do not add more bindings unless necessary.
+
+## Filters
+
+Pressing `f` opens a small centered filter editor.
+
+Filter behavior:
+
+- Filters are persistent.
+- Filters live in `~/.config/hostel/config.json`.
+- Filters are comma-separated keywords.
+- Matching is case-insensitive.
+- A service is hidden if any keyword matches its port, address, process name, command, or memo.
+- Hidden services are not displayed in the main list.
+- Hidden services still count as live for stale memo cleanup, so hiding a running service does not wipe its memo.
+- Empty filter input clears all filters.
+
+Example config:
+
+```json
+{
+  "keybind_mode": "regular",
+  "hidden_keywords": ["postgres", "redis", "9229"]
+}
+```
 
 ## Opening Services
 
@@ -257,12 +294,70 @@ When the user presses `Enter`, open:
 http://localhost:{port}
 ```
 
+If a service has an open path configured, append it:
+
+```text
+http://localhost:{port}{path}
+```
+
+Example:
+
+```text
+http://localhost:8000/docs
+```
+
 Use the platform default browser:
 
 - macOS: `open`
 - Linux: `xdg-open`
 
 After opening, show a short status message.
+
+## Open Paths
+
+Pressing `u` opens a small centered editor for the selected service.
+
+Open path behavior:
+
+- The path is attached to the live service identity.
+- Recommended key: `{pid}:{port}:{process_name}`.
+- Empty input clears the path.
+- Input like `docs` is normalized to `/docs`.
+- Input beginning with `/`, `?`, or `#` is kept as-is.
+- Paths are wiped when the service disappears.
+- Paths are wiped immediately after HOSTEL successfully kills that service.
+- When present, the path appears inline with the service row as `-> /path`.
+
+Open path editor behavior:
+
+- Typing edits the path.
+- `Enter` saves.
+- `Esc` cancels.
+- Input beyond 160 characters is ignored or rejected cleanly.
+
+## Automatic Badges
+
+HOSTEL should classify common dev services into quiet inline badges.
+
+Initial badges:
+
+- `Astro`
+- `Vite`
+- `Next`
+- `Nuxt`
+- `Storybook`
+- `API`
+- `Rust`
+- `Python`
+- `Node`
+
+Badge behavior:
+
+- Badges are automatic, not user-managed.
+- Detection is based on process name and command.
+- Badges must stay subtle and monochrome.
+- Unknown services show no badge.
+- Badge detection should be covered by tests.
 
 ## Memos
 
@@ -313,7 +408,10 @@ Safety requirements:
 - Send SIGTERM only.
 - Do not implement SIGKILL unless explicitly requested.
 - After successful kill, wipe the memo for that service.
+- After successful kill, wipe the open path for that service.
 - After successful kill, refresh the service list.
+- After sending SIGTERM, show a `stopping...` status.
+- On later refresh, show whether the service disappeared or is still listening.
 
 ## Scanner Requirements
 
@@ -366,7 +464,8 @@ Suggested config:
 
 ```json
 {
-  "keybind_mode": "regular"
+  "keybind_mode": "regular",
+  "hidden_keywords": []
 }
 ```
 
@@ -374,7 +473,8 @@ Suggested data:
 
 ```json
 {
-  "memos": {}
+  "memos": {},
+  "url_overrides": {}
 }
 ```
 
@@ -424,8 +524,12 @@ Add focused tests for:
 - loopback filtering
 - port range filtering
 - service sorting
+- badge detection
 - memo key generation
 - 100-character memo limit
+- open path normalization
+- keyword filter normalization
+- hidden-service filtering
 - stale memo cleanup
 - PID safety validation
 - kill verification logic
@@ -449,13 +553,19 @@ HOSTEL is acceptable when:
 - First run uses a full-screen split keybinding selector.
 - Regular arrow-key mode works.
 - Vim mode works.
+- Recognized services show automatic badges.
 - `Enter` opens the selected service in the browser.
+- `u` edits a per-service open path.
 - `k` or `K` opens a safe kill confirmation.
 - Kill never targets PID 0.
 - Kill verifies PID and port before sending SIGTERM.
 - `m` edits a 100-character memo.
+- `f` edits persistent keyword filters.
+- Matching filtered services are hidden from the list.
 - Memos appear inline below processes.
 - Memos are wiped when processes disappear or are killed.
+- Open paths are wiped when processes disappear or are killed.
+- Kill feedback reports `stopping...` and later confirms stopped or still listening.
 - Layout remains clean and bounded at normal and narrow terminal sizes.
 - No old workspace/tag/theme/log/spawn clutter remains.
 - Tests cover scanner and safety behavior.

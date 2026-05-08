@@ -7,7 +7,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::config::{self, AppData, Config, KeybindMode};
 use crate::scanner;
-use crate::service::{is_safe_pid, normalize_memo, LocalService, MEMO_LIMIT};
+use crate::service::{
+    is_safe_pid, normalize_filter_keywords, normalize_memo, normalize_url_path, LocalService,
+    MEMO_LIMIT, URL_PATH_LIMIT,
+};
 
 const BOOT_TICKS: u64 = 19;
 const SCROLL_ESTIMATE: usize = 8;
@@ -18,6 +21,15 @@ pub enum Phase {
     KeybindSelect,
     Main,
     MemoEditor {
+        service_key: String,
+        original: String,
+        text: String,
+    },
+    FilterEditor {
+        original: String,
+        text: String,
+    },
+    UrlEditor {
         service_key: String,
         original: String,
         text: String,
@@ -47,6 +59,12 @@ pub struct StatusMessage {
     pub created_at: Instant,
 }
 
+#[derive(Debug, Clone)]
+pub struct PendingKill {
+    pub service: LocalService,
+    pub sent_at: Instant,
+}
+
 #[derive(Debug)]
 pub struct App {
     pub config: Config,
@@ -59,6 +77,7 @@ pub struct App {
     pub scroll: usize,
     pub boot_tick: u64,
     pub status: Option<StatusMessage>,
+    pub pending_kills: Vec<PendingKill>,
     pub running: bool,
 }
 
@@ -75,6 +94,7 @@ impl App {
             scroll: 0,
             boot_tick: 0,
             status: None,
+            pending_kills: Vec::new(),
             running: true,
         }
     }
@@ -108,6 +128,8 @@ impl App {
             Phase::KeybindSelect => self.handle_selector_key(key).await,
             Phase::Main => self.handle_main_key(key).await,
             Phase::MemoEditor { .. } => self.handle_memo_key(key),
+            Phase::FilterEditor { .. } => self.handle_filter_key(key).await,
+            Phase::UrlEditor { .. } => self.handle_url_key(key),
             Phase::ConfirmKill { .. } => self.handle_confirm_key(key).await,
             Phase::Help => {
                 self.phase = Phase::Main;
@@ -126,15 +148,25 @@ impl App {
             .collect::<HashSet<_>>();
         let before = self.data.memos.len();
         self.data.memos.retain(|key, _| live_keys.contains(key));
-        if self.data.memos.len() != before {
+        let before_urls = self.data.url_overrides.len();
+        self.data
+            .url_overrides
+            .retain(|key, _| live_keys.contains(key));
+        if self.data.memos.len() != before || self.data.url_overrides.len() != before_urls {
             config::save_data(&self.data)?;
         }
 
         for service in &mut services {
             service.memo = self.data.memos.get(&service.memo_key()).cloned();
+            service.url_path = self.data.url_overrides.get(&service.memo_key()).cloned();
         }
 
-        self.services = services;
+        self.update_pending_kills(&services);
+
+        self.services = services
+            .into_iter()
+            .filter(|service| !service.is_hidden_by(&self.config.hidden_keywords))
+            .collect();
         self.selected = old_key
             .and_then(|key| {
                 self.services
@@ -215,9 +247,17 @@ impl App {
                 self.open_memo_editor();
                 Ok(())
             }
+            KeyCode::Char('u') => {
+                self.open_url_editor();
+                Ok(())
+            }
             KeyCode::Char('r') => {
                 self.refresh_services().await?;
                 self.set_status("refreshed localhost services", StatusKind::Info);
+                Ok(())
+            }
+            KeyCode::Char('f') => {
+                self.open_filter_editor();
                 Ok(())
             }
             KeyCode::Char('?') => {
@@ -302,6 +342,106 @@ impl App {
         Ok(())
     }
 
+    fn handle_url_key(&mut self, key: KeyEvent) -> Result<()> {
+        let Phase::UrlEditor {
+            service_key,
+            original,
+            text,
+        } = &mut self.phase
+        else {
+            return Ok(());
+        };
+
+        match key.code {
+            KeyCode::Esc => {
+                let _ = original;
+                self.phase = Phase::Main;
+            }
+            KeyCode::Enter => {
+                let service_key = service_key.clone();
+                let path = normalize_url_path(text);
+                match path {
+                    Some(path) => {
+                        self.data
+                            .url_overrides
+                            .insert(service_key.clone(), path.clone());
+                        if let Some(service) = self
+                            .services
+                            .iter_mut()
+                            .find(|service| service.memo_key() == service_key)
+                        {
+                            service.url_path = Some(path);
+                        }
+                    }
+                    None => {
+                        self.data.url_overrides.remove(&service_key);
+                        if let Some(service) = self
+                            .services
+                            .iter_mut()
+                            .find(|service| service.memo_key() == service_key)
+                        {
+                            service.url_path = None;
+                        }
+                    }
+                }
+                config::save_data(&self.data)?;
+                self.phase = Phase::Main;
+                self.set_status("open path saved", StatusKind::Info);
+            }
+            KeyCode::Backspace => {
+                text.pop();
+            }
+            KeyCode::Char(ch)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT)
+                    && text.chars().count() < URL_PATH_LIMIT =>
+            {
+                if ch != '\n' && ch != '\r' {
+                    text.push(ch);
+                }
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    async fn handle_filter_key(&mut self, key: KeyEvent) -> Result<()> {
+        let Phase::FilterEditor { original, text } = &mut self.phase else {
+            return Ok(());
+        };
+
+        match key.code {
+            KeyCode::Esc => {
+                let _ = original;
+                self.phase = Phase::Main;
+            }
+            KeyCode::Enter => {
+                self.config.hidden_keywords = normalize_filter_keywords(text);
+                config::save_config(&self.config)?;
+                self.phase = Phase::Main;
+                self.refresh_services().await?;
+                let count = self.config.hidden_keywords.len();
+                let noun = if count == 1 { "filter" } else { "filters" };
+                self.set_status(&format!("{count} {noun} active"), StatusKind::Info);
+            }
+            KeyCode::Backspace => {
+                text.pop();
+            }
+            KeyCode::Char(ch)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                if ch != '\n' && ch != '\r' {
+                    text.push(ch);
+                }
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
     async fn handle_confirm_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
             KeyCode::Esc => {
@@ -361,7 +501,7 @@ impl App {
             return Ok(());
         };
 
-        let url = format!("http://localhost:{}", service.port);
+        let url = service.open_url();
         open_url(&url)?;
         self.set_status(&format!("opened {url}"), StatusKind::Info);
         Ok(())
@@ -376,6 +516,29 @@ impl App {
         let service_key = service.memo_key();
         let original = service.memo.clone().unwrap_or_default();
         self.phase = Phase::MemoEditor {
+            service_key,
+            original: original.clone(),
+            text: original,
+        };
+    }
+
+    fn open_filter_editor(&mut self) {
+        let original = self.config.hidden_keywords.join(", ");
+        self.phase = Phase::FilterEditor {
+            original: original.clone(),
+            text: original,
+        };
+    }
+
+    fn open_url_editor(&mut self) {
+        let Some(service) = self.selected_service() else {
+            self.set_status("no service selected", StatusKind::Error);
+            return;
+        };
+
+        let service_key = service.memo_key();
+        let original = service.url_path.clone().unwrap_or_default();
+        self.phase = Phase::UrlEditor {
             service_key,
             original: original.clone(),
             text: original,
@@ -423,18 +586,57 @@ impl App {
 
         send_sigterm(service.pid)?;
         self.data.memos.remove(&service.memo_key());
+        self.data.url_overrides.remove(&service.memo_key());
         config::save_data(&self.data)?;
         self.phase = Phase::Main;
+        self.pending_kills.push(PendingKill {
+            service: service.clone(),
+            sent_at: Instant::now(),
+        });
         self.set_status(
-            &format!(
-                "sent SIGTERM to {}:{}",
-                service.display_name(),
-                service.port
-            ),
+            &format!("stopping {}:{}...", service.display_name(), service.port),
             StatusKind::Info,
         );
         self.refresh_services().await?;
         Ok(())
+    }
+
+    fn update_pending_kills(&mut self, live_services: &[LocalService]) {
+        let mut completed = Vec::new();
+        let mut still_pending = Vec::new();
+
+        for pending in self.pending_kills.drain(..) {
+            let still_live = live_services.iter().any(|service| {
+                service.pid == pending.service.pid && service.port == pending.service.port
+            });
+
+            if !still_live {
+                completed.push((
+                    format!(
+                        "stopped {}:{}",
+                        pending.service.display_name(),
+                        pending.service.port
+                    ),
+                    StatusKind::Info,
+                ));
+            } else if pending.sent_at.elapsed().as_secs_f32() > 3.0 {
+                completed.push((
+                    format!(
+                        "SIGTERM sent; {}:{} still listening",
+                        pending.service.display_name(),
+                        pending.service.port
+                    ),
+                    StatusKind::Error,
+                ));
+            } else {
+                still_pending.push(pending);
+            }
+        }
+
+        self.pending_kills = still_pending;
+        if let Some((message, kind)) = completed.pop() {
+            self.set_status(&message, kind);
+        }
     }
 
     fn set_status(&mut self, text: &str, kind: StatusKind) {

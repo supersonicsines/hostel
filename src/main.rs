@@ -20,7 +20,7 @@ mod ui;
 
 use app::App;
 
-pub const PRODUCT_VERSION: &str = "0.2897";
+pub const PRODUCT_VERSION: &str = "I.0245";
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
-use crate::service::{is_service_port, LocalService};
+use crate::service::{detect_service_kind, is_service_port, LocalService};
 
 #[derive(Debug, Clone)]
 #[cfg(target_os = "linux")]
@@ -99,13 +99,16 @@ fn parse_lsof_services(output: &str) -> Vec<LocalService> {
         };
 
         if let Some((address, port)) = parse_lsof_endpoint(endpoint) {
+            let command = process_name.clone();
             services.push(LocalService {
                 pid,
                 port,
                 address,
                 process_name: process_name.clone(),
-                command: process_name.clone(),
+                command: command.clone(),
+                kind: detect_service_kind(&process_name, &command),
                 memo: None,
+                url_path: None,
             });
         }
     }
@@ -243,7 +246,9 @@ fn parse_proc_net_services(
             address,
             process_name: info.process_name.clone(),
             command: info.command.clone(),
+            kind: detect_service_kind(&info.process_name, &info.command),
             memo: None,
+            url_path: None,
         });
     }
 
@@ -403,7 +408,9 @@ astro    4444 ama   12u  IPv6  12348      0t0  TCP [::1]:4321 (LISTEN)
                 address: "127.0.0.1".to_string(),
                 process_name: "b".to_string(),
                 command: "b".to_string(),
+                kind: crate::service::ServiceKind::Unknown,
                 memo: None,
+                url_path: None,
             },
             LocalService {
                 pid: 2,
@@ -411,7 +418,9 @@ astro    4444 ama   12u  IPv6  12348      0t0  TCP [::1]:4321 (LISTEN)
                 address: "127.0.0.1".to_string(),
                 process_name: "a".to_string(),
                 command: "a".to_string(),
+                kind: crate::service::ServiceKind::Unknown,
                 memo: None,
+                url_path: None,
             },
         ]);
 

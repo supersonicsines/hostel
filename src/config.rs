@@ -10,12 +10,15 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     #[serde(default)]
     pub keybind_mode: KeybindMode,
+    #[serde(default)]
+    pub hidden_keywords: Vec<String>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             keybind_mode: KeybindMode::Regular,
+            hidden_keywords: Vec::new(),
         }
     }
 }
@@ -33,6 +36,8 @@ pub enum KeybindMode {
 pub struct AppData {
     #[serde(default)]
     pub memos: HashMap<String, String>,
+    #[serde(default)]
+    pub url_overrides: HashMap<String, String>,
 }
 
 fn config_dir() -> PathBuf {

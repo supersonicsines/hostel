@@ -42,6 +42,14 @@ pub fn render(frame: &mut Frame, app: &App) {
             render_main(buf, area, app);
             render_memo_editor(buf, area, text);
         }
+        Phase::FilterEditor { text, .. } => {
+            render_main(buf, area, app);
+            render_filter_editor(buf, area, text);
+        }
+        Phase::UrlEditor { text, .. } => {
+            render_main(buf, area, app);
+            render_url_editor(buf, area, text);
+        }
         Phase::ConfirmKill { service } => {
             render_main(buf, area, app);
             render_confirm_kill(buf, area, service);
@@ -190,11 +198,18 @@ fn render_main(buf: &mut Buffer, area: Rect, app: &App) {
 
     let logo_height = render_centered_logo(buf, area, logo_top(area), WHITE);
     let title_y = logo_top(area) + logo_height + 1;
+    let title = if app.config.hidden_keywords.is_empty() {
+        "localhost services 1024-9999".to_string()
+    } else {
+        let count = app.config.hidden_keywords.len();
+        let noun = if count == 1 { "filter" } else { "filters" };
+        format!("localhost services 1024-9999 · {count} {noun} active")
+    };
     centered_text(
         buf,
         area,
         title_y,
-        "localhost services 1024-9999",
+        &title,
         Style::default().fg(MID).bg(BLACK),
     );
 
@@ -291,11 +306,19 @@ fn render_service_row(
         let pid = format!("{:<8}", service.pid);
         write_clipped(buf, inner.x + 1, y, 6, &port, style);
         write_clipped(buf, inner.x + 8, y, 8, &pid, style);
-        let service_text = if inner.width >= 74 && !service.command.trim().is_empty() {
-            format!("{}  {}", service.display_name(), service.command)
-        } else {
-            service.display_name().to_string()
-        };
+        let mut service_text = service.display_name().to_string();
+        if let Some(label) = service.kind.label() {
+            service_text.push_str("  ");
+            service_text.push_str(label);
+        }
+        if let Some(path) = &service.url_path {
+            service_text.push_str("  -> ");
+            service_text.push_str(path);
+        }
+        if inner.width >= 78 && !service.command.trim().is_empty() {
+            service_text.push_str("  ");
+            service_text.push_str(&service.command);
+        }
         write_clipped(
             buf,
             inner.x + 18,
@@ -336,8 +359,12 @@ fn render_memo_subtitle(buf: &mut Buffer, inner: Rect, y: u16, memo: &str, selec
 
 fn render_footer(buf: &mut Buffer, area: Rect, y: u16, app: &App) {
     let keys = match app.config.keybind_mode {
-        KeybindMode::Regular => "↑↓ select   Enter open   k kill   m memo   r refresh   q quit",
-        KeybindMode::Vim => "j/k select   Enter open   K kill   m memo   r refresh   q quit",
+        KeybindMode::Regular => {
+            "↑↓ select   Enter open   k kill   m memo   u url   f filter   r refresh   q quit"
+        }
+        KeybindMode::Vim => {
+            "j/k select   Enter open   K kill   m memo   u url   f filter   r refresh   q quit"
+        }
     };
 
     if let Some(status) = &app.status {
@@ -414,6 +441,110 @@ fn render_memo_editor(buf: &mut Buffer, area: Rect, text: &str) {
     );
 }
 
+fn render_filter_editor(buf: &mut Buffer, area: Rect, text: &str) {
+    let width = area.width.saturating_sub(4).clamp(38, 76);
+    let height = 8.min(area.height.saturating_sub(2)).max(6);
+    let rect = centered_rect(area, width, height);
+    fill(buf, rect, Style::default().fg(WHITE).bg(BLACK));
+    draw_box(buf, rect, Style::default().fg(WHITE).bg(BLACK));
+    write_clipped(
+        buf,
+        rect.x + 2,
+        rect.y,
+        rect.width.saturating_sub(4),
+        " Hide filters ",
+        Style::default()
+            .fg(WHITE)
+            .bg(BLACK)
+            .add_modifier(Modifier::BOLD),
+    );
+    write_clipped(
+        buf,
+        rect.x + 2,
+        rect.y + 2,
+        rect.width.saturating_sub(4),
+        "Comma-separated keywords",
+        Style::default().fg(DIM).bg(BLACK),
+    );
+    write_clipped(
+        buf,
+        rect.x + 2,
+        rect.y + 3,
+        rect.width.saturating_sub(4),
+        text,
+        Style::default().fg(WHITE).bg(BLACK),
+    );
+    write_clipped(
+        buf,
+        rect.x + 2,
+        rect.bottom().saturating_sub(2),
+        rect.width.saturating_sub(4),
+        "Enter save   Esc cancel   empty clears",
+        Style::default().fg(DIM).bg(BLACK),
+    );
+}
+
+fn render_url_editor(buf: &mut Buffer, area: Rect, text: &str) {
+    let width = area.width.saturating_sub(4).clamp(38, 76);
+    let height = 8.min(area.height.saturating_sub(2)).max(6);
+    let rect = centered_rect(area, width, height);
+    fill(buf, rect, Style::default().fg(WHITE).bg(BLACK));
+    draw_box(buf, rect, Style::default().fg(WHITE).bg(BLACK));
+    write_clipped(
+        buf,
+        rect.x + 2,
+        rect.y,
+        rect.width.saturating_sub(4),
+        " Open path ",
+        Style::default()
+            .fg(WHITE)
+            .bg(BLACK)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    let counter = format!(
+        "{}/{}",
+        text.chars().count(),
+        crate::service::URL_PATH_LIMIT
+    );
+    write_clipped(
+        buf,
+        rect.x
+            + rect
+                .width
+                .saturating_sub(counter.chars().count() as u16 + 2),
+        rect.y,
+        counter.chars().count() as u16,
+        &counter,
+        Style::default().fg(DIM).bg(BLACK),
+    );
+
+    write_clipped(
+        buf,
+        rect.x + 2,
+        rect.y + 2,
+        rect.width.saturating_sub(4),
+        "Path appended to localhost, like /docs",
+        Style::default().fg(DIM).bg(BLACK),
+    );
+    write_clipped(
+        buf,
+        rect.x + 2,
+        rect.y + 3,
+        rect.width.saturating_sub(4),
+        text,
+        Style::default().fg(WHITE).bg(BLACK),
+    );
+    write_clipped(
+        buf,
+        rect.x + 2,
+        rect.bottom().saturating_sub(2),
+        rect.width.saturating_sub(4),
+        "Enter save   Esc cancel   empty clears",
+        Style::default().fg(DIM).bg(BLACK),
+    );
+}
+
 fn render_confirm_kill(buf: &mut Buffer, area: Rect, service: &LocalService) {
     let width = area.width.saturating_sub(4).clamp(34, 58);
     let height = 8.min(area.height.saturating_sub(2)).max(6);
@@ -453,7 +584,7 @@ fn render_confirm_kill(buf: &mut Buffer, area: Rect, service: &LocalService) {
 
 fn render_help(buf: &mut Buffer, area: Rect, mode: KeybindMode) {
     let width = area.width.saturating_sub(4).clamp(34, 58);
-    let height = 10.min(area.height.saturating_sub(2)).max(7);
+    let height = 11.min(area.height.saturating_sub(2)).max(8);
     let rect = centered_rect(area, width, height);
     fill(buf, rect, Style::default().fg(WHITE).bg(BLACK));
     draw_box(buf, rect, Style::default().fg(DIM).bg(BLACK));
@@ -473,6 +604,8 @@ fn render_help(buf: &mut Buffer, area: Rect, mode: KeybindMode) {
             "Enter open",
             "k kill",
             "m memo",
+            "u url",
+            "f filter",
             "r refresh",
             "q quit",
         ],
@@ -481,6 +614,8 @@ fn render_help(buf: &mut Buffer, area: Rect, mode: KeybindMode) {
             "Enter open",
             "K kill",
             "m memo",
+            "u url",
+            "f filter",
             "r refresh",
             "q quit",
         ],
