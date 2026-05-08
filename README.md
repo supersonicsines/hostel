@@ -1,6 +1,6 @@
 # HOSTEL
 
-A beautiful monochrome TUI for localhost services.
+A simple TUI for localhost services for vibecoders who iterate simultaneously.
 
 HOSTEL shows TCP listeners bound to localhost on ports `1024..9999`, then lets you:
 
