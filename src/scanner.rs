@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
-use crate::service::{detect_service_kind, is_service_port, LocalService};
+use crate::service::{detect_service_kind, is_service_port, LocalService, ServiceMetadata};
 
 #[derive(Debug, Clone)]
 #[cfg(target_os = "linux")]
@@ -99,7 +99,7 @@ fn parse_lsof_services(output: &str) -> Vec<LocalService> {
         };
 
         if let Some((address, port)) = parse_lsof_endpoint(endpoint) {
-            let command = process_name.clone();
+            let command = read_process_command(pid).unwrap_or_else(|| process_name.clone());
             services.push(LocalService {
                 pid,
                 port,
@@ -107,13 +107,31 @@ fn parse_lsof_services(output: &str) -> Vec<LocalService> {
                 process_name: process_name.clone(),
                 command: command.clone(),
                 kind: detect_service_kind(&process_name, &command),
-                memo: None,
-                url_path: None,
+                metadata: ServiceMetadata::default(),
             });
         }
     }
 
     dedupe_and_sort(services)
+}
+
+#[cfg(target_os = "macos")]
+fn read_process_command(pid: u32) -> Option<String> {
+    let output = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "args="])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let command = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if command.is_empty() {
+        None
+    } else {
+        Some(command)
+    }
 }
 
 fn parse_lsof_endpoint(endpoint: &str) -> Option<(String, u16)> {
@@ -247,8 +265,7 @@ fn parse_proc_net_services(
             process_name: info.process_name.clone(),
             command: info.command.clone(),
             kind: detect_service_kind(&info.process_name, &info.command),
-            memo: None,
-            url_path: None,
+            metadata: ServiceMetadata::default(),
         });
     }
 
@@ -409,8 +426,7 @@ astro    4444 ama   12u  IPv6  12348      0t0  TCP [::1]:4321 (LISTEN)
                 process_name: "b".to_string(),
                 command: "b".to_string(),
                 kind: crate::service::ServiceKind::Unknown,
-                memo: None,
-                url_path: None,
+                metadata: ServiceMetadata::default(),
             },
             LocalService {
                 pid: 2,
@@ -419,8 +435,7 @@ astro    4444 ama   12u  IPv6  12348      0t0  TCP [::1]:4321 (LISTEN)
                 process_name: "a".to_string(),
                 command: "a".to_string(),
                 kind: crate::service::ServiceKind::Unknown,
-                memo: None,
-                url_path: None,
+                metadata: ServiceMetadata::default(),
             },
         ]);
 

@@ -7,7 +7,7 @@ use ratatui::{
 
 use crate::app::{App, Phase, SelectorSide, StatusKind};
 use crate::config::KeybindMode;
-use crate::service::{LocalService, MEMO_LIMIT};
+use crate::service::{LocalService, MEMO_LIMIT, TITLE_LIMIT};
 use crate::PRODUCT_VERSION;
 
 const BLACK: Color = Color::Black;
@@ -41,6 +41,14 @@ pub fn render(frame: &mut Frame, app: &App) {
         Phase::MemoEditor { text, .. } => {
             render_main(buf, area, app);
             render_memo_editor(buf, area, text);
+        }
+        Phase::TitleEditor { text, .. } => {
+            render_main(buf, area, app);
+            render_title_editor(buf, area, text);
+        }
+        Phase::TagsEditor { text, .. } => {
+            render_main(buf, area, app);
+            render_tags_editor(buf, area, text);
         }
         Phase::FilterEditor { text, .. } => {
             render_main(buf, area, app);
@@ -281,7 +289,7 @@ fn render_services_table(buf: &mut Buffer, area: Rect, app: &App) {
         render_service_row(buf, inner, y, service, selected);
         y += 1;
 
-        if let Some(memo) = &service.memo {
+        if let Some(memo) = &service.metadata.memo {
             if y >= inner.bottom() {
                 break;
             }
@@ -306,14 +314,27 @@ fn render_service_row(
         let pid = format!("{:<8}", service.pid);
         write_clipped(buf, inner.x + 1, y, 6, &port, style);
         write_clipped(buf, inner.x + 8, y, 8, &pid, style);
-        let mut service_text = service.display_name().to_string();
+        let mut service_text = service.display_title().to_string();
+        if service.metadata.title.is_some() {
+            service_text.push_str("  ");
+            service_text.push_str(service.display_name());
+        }
         if let Some(label) = service.kind.label() {
             service_text.push_str("  ");
             service_text.push_str(label);
         }
-        if let Some(path) = &service.url_path {
+        if !service.metadata.tags.is_empty() {
+            service_text.push_str("  [");
+            service_text.push_str(&service.metadata.tags.join(","));
+            service_text.push(']');
+        }
+        if let Some(path) = &service.metadata.url_path {
             service_text.push_str("  -> ");
             service_text.push_str(path);
+        }
+        if let Some(source) = &service.metadata.source {
+            service_text.push_str("  @");
+            service_text.push_str(source);
         }
         if inner.width >= 78 && !service.command.trim().is_empty() {
             service_text.push_str("  ");
@@ -328,7 +349,7 @@ fn render_service_row(
             style,
         );
     } else {
-        let row = format!("{:<6} {}", service.port, service.display_name());
+        let row = format!("{:<6} {}", service.port, service.display_title());
         write_clipped(
             buf,
             inner.x + 1,
@@ -360,10 +381,10 @@ fn render_memo_subtitle(buf: &mut Buffer, inner: Rect, y: u16, memo: &str, selec
 fn render_footer(buf: &mut Buffer, area: Rect, y: u16, app: &App) {
     let keys = match app.config.keybind_mode {
         KeybindMode::Regular => {
-            "↑↓ select   Enter open   k kill   m memo   u url   f filter   r refresh   q quit"
+            "↑↓ select   Enter open   k kill   t title   m memo   g tags   u url   f filter   r refresh   q quit"
         }
         KeybindMode::Vim => {
-            "j/k select   Enter open   K kill   m memo   u url   f filter   r refresh   q quit"
+            "j/k select   Enter open   K kill   t title   m memo   g tags   u url   f filter   r refresh   q quit"
         }
     };
 
@@ -437,6 +458,98 @@ fn render_memo_editor(buf: &mut Buffer, area: Rect, text: &str) {
         rect.bottom().saturating_sub(2),
         rect.width.saturating_sub(4),
         "Enter save   Esc cancel",
+        Style::default().fg(DIM).bg(BLACK),
+    );
+}
+
+fn render_title_editor(buf: &mut Buffer, area: Rect, text: &str) {
+    let width = area.width.saturating_sub(4).clamp(32, 72);
+    let height = 7.min(area.height.saturating_sub(2)).max(5);
+    let rect = centered_rect(area, width, height);
+    fill(buf, rect, Style::default().fg(WHITE).bg(BLACK));
+    draw_box(buf, rect, Style::default().fg(WHITE).bg(BLACK));
+    write_clipped(
+        buf,
+        rect.x + 2,
+        rect.y,
+        rect.width.saturating_sub(4),
+        " Title ",
+        Style::default()
+            .fg(WHITE)
+            .bg(BLACK)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    let counter = format!("{}/{}", text.chars().count(), TITLE_LIMIT);
+    write_clipped(
+        buf,
+        rect.x
+            + rect
+                .width
+                .saturating_sub(counter.chars().count() as u16 + 2),
+        rect.y,
+        counter.chars().count() as u16,
+        &counter,
+        Style::default().fg(DIM).bg(BLACK),
+    );
+
+    write_clipped(
+        buf,
+        rect.x + 2,
+        rect.y + 2,
+        rect.width.saturating_sub(4),
+        text,
+        Style::default().fg(WHITE).bg(BLACK),
+    );
+    write_clipped(
+        buf,
+        rect.x + 2,
+        rect.bottom().saturating_sub(2),
+        rect.width.saturating_sub(4),
+        "Enter save   Esc cancel   empty clears",
+        Style::default().fg(DIM).bg(BLACK),
+    );
+}
+
+fn render_tags_editor(buf: &mut Buffer, area: Rect, text: &str) {
+    let width = area.width.saturating_sub(4).clamp(38, 76);
+    let height = 8.min(area.height.saturating_sub(2)).max(6);
+    let rect = centered_rect(area, width, height);
+    fill(buf, rect, Style::default().fg(WHITE).bg(BLACK));
+    draw_box(buf, rect, Style::default().fg(WHITE).bg(BLACK));
+    write_clipped(
+        buf,
+        rect.x + 2,
+        rect.y,
+        rect.width.saturating_sub(4),
+        " Tags ",
+        Style::default()
+            .fg(WHITE)
+            .bg(BLACK)
+            .add_modifier(Modifier::BOLD),
+    );
+    write_clipped(
+        buf,
+        rect.x + 2,
+        rect.y + 2,
+        rect.width.saturating_sub(4),
+        "Comma-separated tags",
+        Style::default().fg(DIM).bg(BLACK),
+    );
+    write_clipped(
+        buf,
+        rect.x + 2,
+        rect.y + 3,
+        rect.width.saturating_sub(4),
+        text,
+        Style::default().fg(WHITE).bg(BLACK),
+    );
+    write_clipped(
+        buf,
+        rect.x + 2,
+        rect.bottom().saturating_sub(2),
+        rect.width.saturating_sub(4),
+        "Enter save   Esc cancel   empty clears",
         Style::default().fg(DIM).bg(BLACK),
     );
 }
@@ -584,7 +697,7 @@ fn render_confirm_kill(buf: &mut Buffer, area: Rect, service: &LocalService) {
 
 fn render_help(buf: &mut Buffer, area: Rect, mode: KeybindMode) {
     let width = area.width.saturating_sub(4).clamp(34, 58);
-    let height = 11.min(area.height.saturating_sub(2)).max(8);
+    let height = 13.min(area.height.saturating_sub(2)).max(8);
     let rect = centered_rect(area, width, height);
     fill(buf, rect, Style::default().fg(WHITE).bg(BLACK));
     draw_box(buf, rect, Style::default().fg(DIM).bg(BLACK));
@@ -603,7 +716,9 @@ fn render_help(buf: &mut Buffer, area: Rect, mode: KeybindMode) {
             "↑↓ move",
             "Enter open",
             "k kill",
+            "t title",
             "m memo",
+            "g tags",
             "u url",
             "f filter",
             "r refresh",
@@ -613,7 +728,9 @@ fn render_help(buf: &mut Buffer, area: Rect, mode: KeybindMode) {
             "j/k move",
             "Enter open",
             "K kill",
+            "t title",
             "m memo",
+            "g tags",
             "u url",
             "f filter",
             "r refresh",

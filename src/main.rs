@@ -13,7 +13,10 @@ use tokio::time::{interval, MissedTickBehavior};
 use tokio_stream::StreamExt;
 
 mod app;
+mod cli;
 mod config;
+mod mcp;
+mod registry;
 mod scanner;
 mod service;
 mod ui;
@@ -23,18 +26,18 @@ use app::App;
 pub const PRODUCT_VERSION: &str = "I.0245";
 
 fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-    if args
-        .iter()
-        .skip(1)
-        .any(|arg| arg == "--version" || arg == "-V")
-    {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|arg| arg == "--version" || arg == "-V") {
         println!("hostel {PRODUCT_VERSION}");
         return Ok(());
     }
 
     let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(async_main())
+    if cli::is_cli_command(&args) {
+        runtime.block_on(cli::run(&args))
+    } else {
+        runtime.block_on(async_main())
+    }
 }
 
 async fn async_main() -> Result<()> {

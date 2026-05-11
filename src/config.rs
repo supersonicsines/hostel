@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::service::ServiceMetadata;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -34,6 +36,8 @@ pub enum KeybindMode {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppData {
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub metadata: HashMap<String, ServiceMetadata>,
     #[serde(default)]
     pub memos: HashMap<String, String>,
     #[serde(default)]
@@ -41,6 +45,12 @@ pub struct AppData {
 }
 
 fn config_dir() -> PathBuf {
+    if let Ok(path) = std::env::var("HOSTEL_CONFIG_DIR") {
+        if !path.trim().is_empty() {
+            return PathBuf::from(path);
+        }
+    }
+
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("hostel")

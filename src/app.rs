@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::process::Command;
 use std::time::Instant;
 
@@ -6,10 +5,11 @@ use anyhow::{anyhow, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::config::{self, AppData, Config, KeybindMode};
+use crate::registry;
 use crate::scanner;
 use crate::service::{
-    is_safe_pid, normalize_filter_keywords, normalize_memo, normalize_url_path, LocalService,
-    MEMO_LIMIT, URL_PATH_LIMIT,
+    is_safe_pid, normalize_filter_keywords, normalize_memo, normalize_tags, normalize_title,
+    normalize_url_path, LocalService, ServiceMetadata, MEMO_LIMIT, TITLE_LIMIT, URL_PATH_LIMIT,
 };
 
 const BOOT_TICKS: u64 = 19;
@@ -21,6 +21,16 @@ pub enum Phase {
     KeybindSelect,
     Main,
     MemoEditor {
+        service_key: String,
+        original: String,
+        text: String,
+    },
+    TitleEditor {
+        service_key: String,
+        original: String,
+        text: String,
+    },
+    TagsEditor {
         service_key: String,
         original: String,
         text: String,
@@ -128,6 +138,8 @@ impl App {
             Phase::KeybindSelect => self.handle_selector_key(key).await,
             Phase::Main => self.handle_main_key(key).await,
             Phase::MemoEditor { .. } => self.handle_memo_key(key),
+            Phase::TitleEditor { .. } => self.handle_title_key(key),
+            Phase::TagsEditor { .. } => self.handle_tags_key(key),
             Phase::FilterEditor { .. } => self.handle_filter_key(key).await,
             Phase::UrlEditor { .. } => self.handle_url_key(key),
             Phase::ConfirmKill { .. } => self.handle_confirm_key(key).await,
@@ -139,26 +151,10 @@ impl App {
     }
 
     pub async fn refresh_services(&mut self) -> Result<()> {
-        let old_key = self.selected_service().map(LocalService::memo_key);
+        let old_key = self.selected_service().map(LocalService::metadata_key);
         let mut services = scanner::scan_services().await?;
-
-        let live_keys = services
-            .iter()
-            .map(LocalService::memo_key)
-            .collect::<HashSet<_>>();
-        let before = self.data.memos.len();
-        self.data.memos.retain(|key, _| live_keys.contains(key));
-        let before_urls = self.data.url_overrides.len();
-        self.data
-            .url_overrides
-            .retain(|key, _| live_keys.contains(key));
-        if self.data.memos.len() != before || self.data.url_overrides.len() != before_urls {
+        if registry::apply_metadata(&mut self.data, &mut services, true) {
             config::save_data(&self.data)?;
-        }
-
-        for service in &mut services {
-            service.memo = self.data.memos.get(&service.memo_key()).cloned();
-            service.url_path = self.data.url_overrides.get(&service.memo_key()).cloned();
         }
 
         self.update_pending_kills(&services);
@@ -171,7 +167,7 @@ impl App {
             .and_then(|key| {
                 self.services
                     .iter()
-                    .position(|service| service.memo_key() == key)
+                    .position(|service| service.metadata_key() == key)
             })
             .unwrap_or_else(|| self.selected.min(self.services.len().saturating_sub(1)));
 
@@ -247,6 +243,14 @@ impl App {
                 self.open_memo_editor();
                 Ok(())
             }
+            KeyCode::Char('t') => {
+                self.open_title_editor();
+                Ok(())
+            }
+            KeyCode::Char('g') => {
+                self.open_tags_editor();
+                Ok(())
+            }
             KeyCode::Char('u') => {
                 self.open_url_editor();
                 Ok(())
@@ -280,6 +284,48 @@ impl App {
         }
     }
 
+    fn handle_title_key(&mut self, key: KeyEvent) -> Result<()> {
+        let Phase::TitleEditor {
+            service_key,
+            original,
+            text,
+        } = &mut self.phase
+        else {
+            return Ok(());
+        };
+
+        match key.code {
+            KeyCode::Esc => {
+                let _ = original;
+                self.phase = Phase::Main;
+            }
+            KeyCode::Enter => {
+                let service_key = service_key.clone();
+                let title = normalize_title(text);
+                let mut metadata = self.metadata_for_key(&service_key);
+                metadata.title = title;
+                self.save_metadata_for_key(&service_key, metadata)?;
+                self.phase = Phase::Main;
+                self.set_status("title saved", StatusKind::Info);
+            }
+            KeyCode::Backspace => {
+                text.pop();
+            }
+            KeyCode::Char(ch)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT)
+                    && text.chars().count() < TITLE_LIMIT =>
+            {
+                if ch != '\n' && ch != '\r' {
+                    text.push(ch);
+                }
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
     fn handle_memo_key(&mut self, key: KeyEvent) -> Result<()> {
         let Phase::MemoEditor {
             service_key,
@@ -298,29 +344,9 @@ impl App {
             KeyCode::Enter => {
                 let service_key = service_key.clone();
                 let memo = normalize_memo(text);
-                match memo {
-                    Some(memo) => {
-                        self.data.memos.insert(service_key.clone(), memo.clone());
-                        if let Some(service) = self
-                            .services
-                            .iter_mut()
-                            .find(|service| service.memo_key() == service_key)
-                        {
-                            service.memo = Some(memo);
-                        }
-                    }
-                    None => {
-                        self.data.memos.remove(&service_key);
-                        if let Some(service) = self
-                            .services
-                            .iter_mut()
-                            .find(|service| service.memo_key() == service_key)
-                        {
-                            service.memo = None;
-                        }
-                    }
-                }
-                config::save_data(&self.data)?;
+                let mut metadata = self.metadata_for_key(&service_key);
+                metadata.memo = memo;
+                self.save_metadata_for_key(&service_key, metadata)?;
                 self.phase = Phase::Main;
                 self.set_status("memo saved", StatusKind::Info);
             }
@@ -331,6 +357,47 @@ impl App {
                 if !key.modifiers.contains(KeyModifiers::CONTROL)
                     && !key.modifiers.contains(KeyModifiers::ALT)
                     && text.chars().count() < MEMO_LIMIT =>
+            {
+                if ch != '\n' && ch != '\r' {
+                    text.push(ch);
+                }
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    fn handle_tags_key(&mut self, key: KeyEvent) -> Result<()> {
+        let Phase::TagsEditor {
+            service_key,
+            original,
+            text,
+        } = &mut self.phase
+        else {
+            return Ok(());
+        };
+
+        match key.code {
+            KeyCode::Esc => {
+                let _ = original;
+                self.phase = Phase::Main;
+            }
+            KeyCode::Enter => {
+                let service_key = service_key.clone();
+                let tags = normalize_tags(std::slice::from_ref(&*text));
+                let mut metadata = self.metadata_for_key(&service_key);
+                metadata.tags = tags;
+                self.save_metadata_for_key(&service_key, metadata)?;
+                self.phase = Phase::Main;
+                self.set_status("tags saved", StatusKind::Info);
+            }
+            KeyCode::Backspace => {
+                text.pop();
+            }
+            KeyCode::Char(ch)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
             {
                 if ch != '\n' && ch != '\r' {
                     text.push(ch);
@@ -360,31 +427,9 @@ impl App {
             KeyCode::Enter => {
                 let service_key = service_key.clone();
                 let path = normalize_url_path(text);
-                match path {
-                    Some(path) => {
-                        self.data
-                            .url_overrides
-                            .insert(service_key.clone(), path.clone());
-                        if let Some(service) = self
-                            .services
-                            .iter_mut()
-                            .find(|service| service.memo_key() == service_key)
-                        {
-                            service.url_path = Some(path);
-                        }
-                    }
-                    None => {
-                        self.data.url_overrides.remove(&service_key);
-                        if let Some(service) = self
-                            .services
-                            .iter_mut()
-                            .find(|service| service.memo_key() == service_key)
-                        {
-                            service.url_path = None;
-                        }
-                    }
-                }
-                config::save_data(&self.data)?;
+                let mut metadata = self.metadata_for_key(&service_key);
+                metadata.url_path = path;
+                self.save_metadata_for_key(&service_key, metadata)?;
                 self.phase = Phase::Main;
                 self.set_status("open path saved", StatusKind::Info);
             }
@@ -513,9 +558,39 @@ impl App {
             return;
         };
 
-        let service_key = service.memo_key();
-        let original = service.memo.clone().unwrap_or_default();
+        let service_key = service.metadata_key();
+        let original = service.metadata.memo.clone().unwrap_or_default();
         self.phase = Phase::MemoEditor {
+            service_key,
+            original: original.clone(),
+            text: original,
+        };
+    }
+
+    fn open_title_editor(&mut self) {
+        let Some(service) = self.selected_service() else {
+            self.set_status("no service selected", StatusKind::Error);
+            return;
+        };
+
+        let service_key = service.metadata_key();
+        let original = service.metadata.title.clone().unwrap_or_default();
+        self.phase = Phase::TitleEditor {
+            service_key,
+            original: original.clone(),
+            text: original,
+        };
+    }
+
+    fn open_tags_editor(&mut self) {
+        let Some(service) = self.selected_service() else {
+            self.set_status("no service selected", StatusKind::Error);
+            return;
+        };
+
+        let service_key = service.metadata_key();
+        let original = service.metadata.tags.join(", ");
+        self.phase = Phase::TagsEditor {
             service_key,
             original: original.clone(),
             text: original,
@@ -536,8 +611,8 @@ impl App {
             return;
         };
 
-        let service_key = service.memo_key();
-        let original = service.url_path.clone().unwrap_or_default();
+        let service_key = service.metadata_key();
+        let original = service.metadata.url_path.clone().unwrap_or_default();
         self.phase = Phase::UrlEditor {
             service_key,
             original: original.clone(),
@@ -585,9 +660,9 @@ impl App {
         }
 
         send_sigterm(service.pid)?;
-        self.data.memos.remove(&service.memo_key());
-        self.data.url_overrides.remove(&service.memo_key());
-        config::save_data(&self.data)?;
+        if registry::clear_metadata(&mut self.data, &service) {
+            config::save_data(&self.data)?;
+        }
         self.phase = Phase::Main;
         self.pending_kills.push(PendingKill {
             service: service.clone(),
@@ -646,9 +721,48 @@ impl App {
             created_at: Instant::now(),
         });
     }
+
+    fn metadata_for_key(&self, service_key: &str) -> ServiceMetadata {
+        self.data
+            .metadata
+            .get(service_key)
+            .cloned()
+            .or_else(|| {
+                self.services
+                    .iter()
+                    .find(|service| service.metadata_key() == service_key)
+                    .map(|service| service.metadata.clone())
+            })
+            .unwrap_or_default()
+    }
+
+    fn save_metadata_for_key(
+        &mut self,
+        service_key: &str,
+        mut metadata: ServiceMetadata,
+    ) -> Result<()> {
+        metadata.updated_at_unix = Some(registry::now_unix());
+        if metadata.is_empty() {
+            self.data.metadata.remove(service_key);
+        } else {
+            self.data
+                .metadata
+                .insert(service_key.to_string(), metadata.clone());
+        }
+
+        if let Some(service) = self
+            .services
+            .iter_mut()
+            .find(|service| service.metadata_key() == service_key)
+        {
+            service.metadata = metadata;
+        }
+
+        config::save_data(&self.data)
+    }
 }
 
-fn open_url(url: &str) -> Result<()> {
+pub(crate) fn open_url(url: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
     let opener = "open";
     #[cfg(target_os = "linux")]
